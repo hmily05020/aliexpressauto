@@ -1,0 +1,31 @@
+
+  ipcMain.handle("chrome:writeRegionalPricing", async (_event, value) => {
+    if (!value) throw new Error("value is required");
+    const { tabs } = await getConnectedChromeTabs();
+    const editTab = await pickBestDxmEditTab(tabs);
+    if (!editTab) throw new Error("没有找到店小秘编辑页");
+    await waitForDxmEditContent(editTab);
+    const target = JSON.stringify(value);
+    const expression = "(() => new Promise(async (resolve) => {" +
+      "var target=" + target + ";" +
+      "var n=function(v){return(v||'').replace(/\\s+/g,' ').trim()};" +
+      "var slp=function(ms){return new Promise(function(d){setTimeout(d,ms)})};" +
+      "var vis=function(el){if(!el||!el.getBoundingClientRect)return false;var r=el.getBoundingClientRect();return r.width>0&&r.height>0};" +
+      "var clk=function(el){el.scrollIntoView({block:'center'});var r=el.getBoundingClientRect();['mouseover','mousedown','mouseup','click'].forEach(function(t){el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,clientX:r.left+r.width/2,clientY:r.top+r.height/2}))})};" +
+      "var cards=Array.from(document.querySelectorAll('.form-card')).filter(vis);" +
+      "var rpCard=cards.find(function(c){return n(c.querySelector('h4')?c.querySelector('h4').innerText:'').indexOf('区域调价')>=0});" +
+      "if(!rpCard){resolve({ok:false,reason:'no card'});return}" +
+      "var dSel=rpCard.querySelector('.d-selector .ant-select,.in-selector .ant-select');" +
+      "if(!dSel)dSel=Array.from(rpCard.querySelectorAll('.ant-select')).filter(vis).find(function(s){return !s.closest('.ant-form-item')});" +
+      "if(!dSel){resolve({ok:false,reason:'no selector'});return}" +
+      "if(document.activeElement&&document.activeElement.blur)document.activeElement.blur();document.body.click();await slp(300);" +
+      "var trigger=dSel.querySelector('.ant-select-selector')||dSel;clk(trigger);await slp(800);" +
+      "var allOpts=Array.from(document.querySelectorAll('.ant-select-item-option'));" +
+      "var found=allOpts.find(function(o){var t=n(o.innerText||o.textContent);return t===target||t.indexOf(target)>=0});" +
+      "if(found){var content=found.querySelector('.ant-select-item-option-content')||found;clk(content);resolve({ok:true})}" +
+      "else{resolve({ok:false,allTexts:allOpts.map(function(o){return n(o.innerText||o.textContent)}).filter(Boolean).filter(function(v,i,a){return a.indexOf(v)===i}).slice(0,20)})}" +
+      "}))()";
+    const result = await evaluateInTab(editTab, expression);
+    appendAutomationLog("writeRegionalPricing", JSON.stringify(result));
+    return result;
+  });

@@ -1,0 +1,33 @@
+
+  // Fill packaging weight and dimensions from presets
+  ipcMain.handle("chrome:fillPackaging", async (_event, params) => {
+    const p = params || {};
+    const { tabs } = await getConnectedChromeTabs();
+    const editTab = await pickBestDxmEditTab(tabs);
+    if (!editTab) throw new Error("没有找到店小秘编辑页");
+    await waitForDxmEditContent(editTab);
+    const payload = JSON.stringify(p);
+    const expression = "(() => new Promise(async (resolve) => {" +
+      "var p=" + payload + ";" +
+      "var n=function(v){return(v||'').replace(/\\s+/g,' ').trim()};" +
+      "var slp=function(ms){return new Promise(function(d){setTimeout(d,ms)})};" +
+      "var vis=function(el){if(!el||!el.getBoundingClientRect)return false;var r=el.getBoundingClientRect();return r.width>0&&r.height>0};" +
+      "var setVal=function(input,value){if(!input||value==null)return;input.focus();var setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set;if(setter)setter.call(input,String(value));else input.value=String(value);input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));input.dispatchEvent(new Event('blur',{bubbles:true}))};" +
+      "var cards=Array.from(document.querySelectorAll('.form-card')).filter(vis);" +
+      "var pkgCard=cards.find(function(c){return n(c.querySelector('h4')?c.querySelector('h4').innerText:'').indexOf('包装信息')>=0});" +
+      "if(!pkgCard){resolve({ok:false,reason:'no card'});return}" +
+      "var inputs=Array.from(pkgCard.querySelectorAll('input[type=text],input:not([type])')).filter(vis);" +
+      "var filled={};" +
+      "// Weight: first text input with class w100" +
+      "if(p.weight){var wtInp=inputs[0];if(!wtInp||wtInp.type==='search')wtInp=inputs.find(function(i){return i.type==='text'&&!i.className.includes('search')});if(wtInp){setVal(wtInp,p.weight);filled.weight=p.weight}}" +
+      "// Dimensions: find inputs after 尺寸 label" +
+      "var dimInputs=inputs.filter(function(i){return i.type==='text'&&!i.className.includes('search')&&!i.className.includes('w100')});" +
+      "if(p.length&&dimInputs[1]){setVal(dimInputs[1],p.length);filled.length=p.length}" +
+      "if(p.width&&dimInputs[2]){setVal(dimInputs[2],p.width);filled.width=p.width}" +
+      "if(p.height&&dimInputs[3]){setVal(dimInputs[3],p.height);filled.height=p.height}" +
+      "resolve({ok:true,filled:filled});" +
+      "}))()";
+    const result = await evaluateInTab(editTab, expression);
+    appendAutomationLog("fillPackaging", JSON.stringify(result));
+    return result;
+  });

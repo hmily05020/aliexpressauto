@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+env/
+
+# Build and release outputs
+dist/
+build/
+release/
+legacy_extract/
+*.spec.bak
+*.orig
+*_backup_*.py
+facai_source/facai/ShopAutomationGUI_*.spec
+*.exe
+*.zip
+*.rar
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Runtime data and secrets
+.env
+.env.*
+runtime_config.json
+dropdown_options.json
+automation.log
+last_error_traceback.log
+output/
+chrome-debug-profile/
+
+# Logs
+*.log
+logs/
+
+# Local editor/OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
