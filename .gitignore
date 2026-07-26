@@ -13,6 +13,7 @@ legacy_extract/
 *.orig
 *_backup_*.py
 facai_source/facai/ShopAutomationGUI_*.spec
+ShopAutomationGUI_*.spec
 *.exe
 *.zip
 *.rar

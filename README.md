@@ -1,6 +1,6 @@
 # AliExpress 店小秘自动上架助手
 
-这是一个用于店小秘速卖通采集箱商品自动编辑的桌面工具。当前主版本位于 `facai_source/facai`，使用 Python、Tkinter 和 Playwright 连接 Chrome 调试端口完成页面自动化。
+这是一个用于店小秘速卖通采集箱商品自动编辑的桌面工具。当前主版本使用 Python、Tkinter 和 Playwright 连接 Chrome 调试端口完成页面自动化。
 
 ## 主要能力
 
@@ -20,20 +20,17 @@
 ## 源码结构
 
 ```text
-facai_source/facai/
-  automation_gui.py        # Tkinter GUI
-  main_automation.py       # Playwright 自动化主流程
-  config.py                # 默认配置和运行时配置加载
-  requirements.txt         # Python 依赖
-  assets/                  # 图标资源
+automation_gui.py        # Tkinter GUI
+main_automation.py       # Playwright 自动化主流程
+config.py                # 默认配置和运行时配置加载
+requirements.txt         # Python 依赖
+ShopAutomationGUI.spec   # PyInstaller 打包配置
+assets/                  # 图标资源
 ```
-
-根目录下的 `src/`、`electron/`、`scripts/` 是早期 Electron 原型和调试脚本，当前可运行版本以 `facai_source/facai` 为准。
 
 ## 本地运行
 
 ```bash
-cd facai_source/facai
 pip install -r requirements.txt
 python automation_gui.py
 ```
@@ -49,11 +46,10 @@ python automation_gui.py
 ## 打包 Windows EXE
 
 ```bash
-cd facai_source/facai
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name ShopAutomationGUI --icon "assets\ae_icon.ico" --add-data "assets;assets" --collect-data playwright --hidden-import main_automation --hidden-import config --hidden-import playwright.async_api --hidden-import PIL.Image --hidden-import PIL._tkinter_finder automation_gui.py
 ```
 
-打包产物位于 `facai_source/facai/dist/`，不会提交到仓库。
+打包产物位于 `dist/`，不会提交到仓库。
 
 ## 配置和安全
 
@@ -69,4 +65,3 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name ShopAutoma
 - `*.exe`
 - `*.zip`
 - `*.rar`
-
