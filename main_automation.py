@@ -563,10 +563,8 @@ class ShopAutomationRunner:
                 await self.step_description_info()
                 await self.step_packaging_info()
 
-                logger.info("当前调试流程跳过店小秘一键翻译，仅执行AI标题/SKU优化")
-                await self.step_ai_text_optimization()
-                await self.capture_state("05_ai_text_only")
-                logger.info("AI文本处理完成，进入模板配置与海关监管步骤")
+                await self.step_translate()
+                logger.info("翻译/AI文本处理完成，进入模板配置与海关监管步骤")
                 await self.step_select_templates_and_options()
 
                 published_ok = await self.step_publish()
@@ -3168,6 +3166,7 @@ class ShopAutomationRunner:
         customs_skip_flow = customs_mode == "跳过海关监管" or (
             customs_mode == "按预设下拉选择" and all_customs_fields_skipped
         )
+        customs_auto_fill_targets: list[str] = []
 
         async def click_customs_add_or_update_button() -> bool:
             clicked = await self.smart_click_by_text(
@@ -3179,38 +3178,178 @@ class ShopAutomationRunner:
                 await asyncio.sleep(0.8)
             return clicked
 
-        async def close_customs_modal_if_visible(reason: str):
+        async def confirm_or_close_customs_modal_if_visible(reason: str) -> bool:
             try:
-                modal = self.page.locator(".ant-modal-content").filter(has_text="海关监管").first
-                if await modal.count() == 0 or not await modal.is_visible():
-                    return
-                close_targets = [
-                    modal.locator("xpath=ancestor::div[contains(@class,'ant-modal')][1]//button[contains(@class,'ant-modal-close')]").first,
-                    modal.locator("button:has-text('取消')").first,
-                    modal.locator("button:has-text('取 消')").first,
-                ]
-                for target in close_targets:
-                    try:
-                        if await target.count() > 0:
-                            await target.click(timeout=1500, force=True)
-                            logger.warning(f"{reason}: 已关闭海关监管弹窗，不执行下拉选择")
-                            await asyncio.sleep(0.4)
-                            return
-                    except Exception:
-                        continue
+                result = await self.page.evaluate(
+                    """() => {
+                        const visible = (el) => {
+                            if (!el || !el.getBoundingClientRect) return false;
+                            const st = window.getComputedStyle(el);
+                            const r = el.getBoundingClientRect();
+                            return st.display !== "none" && st.visibility !== "hidden" && r.width > 0 && r.height > 0;
+                        };
+                        const clickNode = (node) => {
+                            const rect = node.getBoundingClientRect();
+                            const init = {
+                                bubbles: true,
+                                cancelable: true,
+                                view: window,
+                                clientX: rect.left + rect.width / 2,
+                                clientY: rect.top + rect.height / 2,
+                            };
+                            ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach((type) => {
+                                node.dispatchEvent(new MouseEvent(type, init));
+                            });
+                        };
+                        const modals = Array.from(document.querySelectorAll(".ant-modal-content, .ant-drawer-content"))
+                            .filter((el) => visible(el) && (el.innerText || "").includes("海关监管"));
+                        const modal = modals[modals.length - 1];
+                        if (!modal) return { ok: false, action: "", text: "" };
+                        const buttons = Array.from(modal.querySelectorAll("button, .ant-modal-close, .ant-drawer-close"))
+                            .filter(visible)
+                            .map((node) => ({ node, text: (node.innerText || node.textContent || "").replace(/\\s+/g, "").trim() }));
+                        const confirm = buttons.find((item) => item.text.includes("确定"));
+                        if (confirm) {
+                            clickNode(confirm.node);
+                            return { ok: true, action: "confirm", text: confirm.text };
+                        }
+                        const cancel = buttons.find((item) => item.text.includes("取消"));
+                        if (cancel) {
+                            clickNode(cancel.node);
+                            return { ok: true, action: "cancel", text: cancel.text };
+                        }
+                        const close = buttons.find((item) => item.node.className && String(item.node.className).includes("close"));
+                        if (close) {
+                            clickNode(close.node);
+                            return { ok: true, action: "close", text: close.text };
+                        }
+                        return { ok: false, action: "", text: modal.innerText.slice(0, 120) };
+                    }"""
+                )
+                if result and result.get("ok"):
+                    if result.get("action") == "confirm":
+                        logger.success(f"{reason}: 已确认海关监管弹窗")
+                        await asyncio.sleep(0.8)
+                    else:
+                        logger.warning(f"{reason}: 已关闭海关监管弹窗，不执行下拉选择")
+                        await asyncio.sleep(0.4)
+                    return True
+                if result and result.get("text"):
+                    logger.warning(f"{reason}: 找到海关监管弹窗但未找到确定/关闭按钮: {result.get('text')}")
+            except Exception as exc:
+                logger.warning(f"{reason}: 处理海关监管弹窗失败: {exc}")
+            return False
+
+        async def customs_select_snapshot() -> list[dict]:
+            try:
+                result = await self.page.evaluate(
+                    """() => {
+                        const visible = (el) => {
+                            if (!el || !el.getBoundingClientRect) return false;
+                            const st = window.getComputedStyle(el);
+                            const r = el.getBoundingClientRect();
+                            return st.display !== "none" && st.visibility !== "hidden" && r.width > 0 && r.height > 0;
+                        };
+                        const modals = Array.from(document.querySelectorAll(".ant-modal-content, .ant-drawer-content"))
+                            .filter((el) => visible(el) && (el.innerText || "").includes("海关监管"));
+                        const modal = modals[modals.length - 1];
+                        if (!modal) return { count: 0, snapshot: [] };
+                        const snapshot = [];
+                        const selects = [];
+                        for (const select of Array.from(modal.querySelectorAll(".ant-select")).filter(visible)) {
+                            const row = select.closest(".ant-form-item") || select.closest(".ant-row") || select.parentElement;
+                            const label = (
+                                row?.querySelector(".ant-form-item-label")?.innerText
+                                || row?.querySelector("label")?.innerText
+                                || row?.innerText
+                                || ""
+                            ).replace(/\\s+/g, " ").trim();
+                            const text = (
+                                select.querySelector(".ant-select-selection-item")?.getAttribute("title")
+                                || select.querySelector(".ant-select-selection-item")?.innerText
+                                || select.querySelector(".ant-select-selection-placeholder")?.innerText
+                                || select.innerText
+                                || ""
+                            ).replace(/\\s+/g, " ").trim();
+                            const disabled = select.classList.contains("ant-select-disabled") || !!select.querySelector("input[disabled]");
+                            const unresolved = !disabled && (!text || text.includes("请选择") || text.includes("Please select"));
+                            snapshot.push(`${label || "字段"}=${text || "空"}`);
+                            selects.push({ label, text, disabled, unresolved });
+                        }
+                        const count = selects.filter((item) => item.unresolved).length;
+                        return { count, snapshot, selects };
+                    }"""
+                )
+                if result:
+                    logger.info(f"海关监管待选择下拉检测: count={result.get('count')}, snapshot={result.get('snapshot')}")
+                    return result.get("selects") or []
+            except Exception as exc:
+                logger.warning(f"海关监管待选择下拉检测失败: {exc}")
+            return []
+
+        def build_auto_customs_targets(selects: list[dict]) -> list[str]:
+            configured_levels = [
+                str(CONFIG.get("customs_level1", "")).strip(),
+                str(CONFIG.get("customs_level2", "")).strip(),
+                str(CONFIG.get("customs_level3", "")).strip(),
+                str(CONFIG.get("customs_level4", "")).strip(),
+            ]
+            customs_item = str(CONFIG.get("customs_item", "")).strip()
+            customs_material = str(CONFIG.get("customs_material", "")).strip()
+
+            def first_value(candidates: list[str]) -> str:
+                for value in candidates:
+                    value = (value or "").strip()
+                    if value and "请选择" not in value:
+                        return value
+                return "其他(Other)"
+
+            targets: list[str] = []
+            for idx, item in enumerate(selects):
+                current = str(item.get("text", "") or "").strip()
+                label = str(item.get("label", "") or "").lower()
+                if current and "请选择" not in current and "please select" not in current.lower():
+                    targets.append(current)
+                    continue
+                if "material" in label or "材质" in label:
+                    targets.append(first_value([customs_material, configured_levels[1], configured_levels[0], "其他(Other)"]))
+                elif "vehicle part" in label or "车辆零件" in label or "车身零件" in label or "part type" in label:
+                    targets.append(first_value([customs_item, configured_levels[0], configured_levels[1], "其他(Other)"]))
+                else:
+                    target_by_index = configured_levels[idx] if idx < len(configured_levels) else ""
+                    targets.append(first_value([target_by_index, customs_item, customs_material, "其他(Other)"]))
+            return targets
+
+        async def unresolved_customs_select_count() -> int:
+            try:
+                selects = await customs_select_snapshot()
+                return sum(1 for item in selects if item.get("unresolved"))
             except Exception:
-                pass
+                return 0
+            return 0
 
         if customs_skip_flow:
             logger.info(f"海关监管流程已跳过: mode={customs_mode}, all_fields_skipped={all_customs_fields_skipped}")
         elif customs_click_only:
-            logger.info("海关监管处理方式=仅点击添加/更新：只点击按钮，不进入下拉选择")
+            logger.info("海关监管处理方式=仅点击添加/更新：先点击按钮，再检测翻译后是否生成海关下拉字段")
             clicked_customs = await click_customs_add_or_update_button()
             if clicked_customs:
                 logger.success("海关监管仅点击模式：已点击添加/更新按钮")
+                await asyncio.sleep(1.0)
+                modal_selects = await customs_select_snapshot()
+                modal_select_count = sum(1 for item in modal_selects if item.get("unresolved"))
+                if modal_select_count > 0:
+                    customs_auto_fill_targets = build_auto_customs_targets(modal_selects)
+                    logger.warning(
+                        f"海关监管仅点击模式点击后出现 {modal_select_count} 个待选择下拉字段，"
+                        f"自动切换为按弹窗字段选择: {customs_auto_fill_targets}"
+                    )
+                    customs_click_only = False
+                    customs_mode = "按预设下拉选择(自动)"
+                else:
+                    await confirm_or_close_customs_modal_if_visible("海关监管仅点击模式")
             else:
                 logger.warning("海关监管仅点击模式：未找到或未点到添加/更新按钮，继续后续流程")
-            await close_customs_modal_if_visible("海关监管仅点击模式")
         else:
             await click_customs_add_or_update_button()
 
@@ -3223,7 +3362,7 @@ class ShopAutomationRunner:
             except Exception:
                 return None
 
-            modal = self.page.locator(".ant-modal-content").filter(has_text="海关监管").first
+            modal = self.page.locator(".ant-modal-content").filter(has_text="海关监管").last
             try:
                 if await modal.is_visible():
                     return modal
@@ -3414,7 +3553,10 @@ class ShopAutomationRunner:
         # 通用海关监管多级方案：
         # - 优先用 customs_level1~4
         # - 兼容旧字段 customs_item/customs_material
-        if customs_skip_flow or customs_click_only:
+        if customs_auto_fill_targets:
+            customs_levels = customs_auto_fill_targets
+            logger.info("海关监管使用弹窗字段自动目标，不受跳过勾选限制")
+        elif customs_skip_flow or customs_click_only:
             customs_levels = []
         else:
             customs_levels = [
@@ -3455,6 +3597,11 @@ class ShopAutomationRunner:
                                 .replace(/\\uFF09/g, ")")
                                 .match(/\\(([A-Za-z][A-Za-z0-9\\s\\-\\/]+)\\)/);
                             return m ? normalize(m[1]) : "";
+                        };
+                        const isOtherText = (s) => {
+                            const n = normalize(s).replace(/\\(other\\)/gi, "");
+                            const key = englishKey(s);
+                            return n === "其他" || n === "other" || key === "other";
                         };
                         const visible = (node) => {
                             if (!node || !node.getBoundingClientRect) return false;
@@ -3523,6 +3670,7 @@ class ShopAutomationRunner:
                                 const key = englishKey(text) || norm;
                                 let score = 0;
                                 if (norm === target) score = 100;
+                                else if (isOtherText(text) && isOtherText(targetText)) score = 95;
                                 else if (targetKey && key === targetKey) score = 90;
                                 else if (target && (norm.startsWith(target) || target.startsWith(norm))) score = 80;
                                 else if (target && (norm.includes(target) || target.includes(norm))) score = 70;
@@ -3585,6 +3733,10 @@ class ShopAutomationRunner:
                                 .trim()
                                 .toLowerCase();
                             const target = normalize(targetText);
+                            const isOtherText = (s) => {
+                                const n = normalize(s).replace(/\\(other\\)/gi, "");
+                                return n === "其他" || n === "other";
+                            };
                             const roots = Array.from(document.querySelectorAll(".ant-select-dropdown"))
                                 .filter((el) => {
                                     const st = window.getComputedStyle(el);
@@ -3605,6 +3757,7 @@ class ShopAutomationRunner:
                                 return { el, text, norm };
                             }).filter((item) => item.text).find((item) => (
                                 item.norm === target
+                                || (isOtherText(item.text) && isOtherText(targetText))
                                 || item.norm.startsWith(target)
                                 || target.startsWith(item.norm)
                                 || item.norm.includes(target)
@@ -3665,6 +3818,11 @@ class ShopAutomationRunner:
                                 .match(/\\(([A-Za-z][A-Za-z0-9\\s\\-\\/]+)\\)/);
                             return m ? normalize(m[1]) : "";
                         };
+                        const isOtherText = (s) => {
+                            const n = normalize(s).replace(/\\(other\\)/gi, "");
+                            const key = englishKey(s);
+                            return n === "其他" || n === "other" || key === "other";
+                        };
                         const visible = (node) => {
                             if (!node || !node.getBoundingClientRect) return false;
                             const st = window.getComputedStyle(node);
@@ -3715,6 +3873,7 @@ class ShopAutomationRunner:
                             const key = englishKey(text) || norm;
                             let score = 0;
                             if (norm === target) score = 100;
+                            else if (isOtherText(text) && isOtherText(targetText)) score = 95;
                             else if (targetKey && key === targetKey) score = 90;
                             else if (target && (norm.startsWith(target) || target.startsWith(norm))) score = 80;
                             else if (target && (norm.includes(target) || target.includes(norm))) score = 70;
@@ -3800,6 +3959,10 @@ class ShopAutomationRunner:
             target_norm = normalize_customs_text(option_text)
             if not current_norm or not target_norm or "请选择" in (current_text or ""):
                 return False
+            current_other = current_norm.replace("(other)", "") in {"其他", "other"}
+            target_other = target_norm.replace("(other)", "") in {"其他", "other"}
+            if current_other and target_other:
+                return True
             return (
                 current_norm == target_norm
                 or current_norm.startswith(target_norm)
@@ -3919,7 +4082,7 @@ class ShopAutomationRunner:
             logger.warning(f"海关监管第{next_level_index+1}级等待超时：子级字段尚未生成")
             return False
 
-        async def pick_customs_level_by_index(level_index: int, option_text: str) -> bool:
+        async def pick_customs_level_by_index(level_index: int, option_text: str, allow_fallback: bool = False) -> bool:
             """
             按“当前弹窗里的第 N 个下拉框”去选，不依赖字段名字固定不变。
             每选一层，都等待下一层异步加载出来。
@@ -4043,7 +4206,7 @@ class ShopAutomationRunner:
 
             current_text = await get_select_current_text(selector)
             logger.warning(f"海关监管第{level_index+1}级未找到目标选项: {option_text}，当前字段值={current_text or '空'}")
-            if level_index >= 2:
+            if allow_fallback or level_index >= 2:
                 if current_text and "请选择" not in current_text:
                     logger.warning(
                         f"海关监管第{level_index+1}级目标与页面候选不匹配，保留当前值继续: "
@@ -4053,8 +4216,25 @@ class ShopAutomationRunner:
                     await wait_customs_after_level(level_index, next_idx)
                     return True
 
-                for fallback_text in ["其他(Other)（AI推荐）", "其他(Other)(AI推荐)", "其他", "Other"]:
-                    if await click_dropdown_option_by_normalized_text(fallback_text, f"海关监管第{level_index+1}级兜底", selector):
+                for fallback_text in ["其他(Other)（AI推荐）", "其他(Other)(AI推荐)", "其他(Other)", "其他", "Other"]:
+                    fallback_clicked = await click_dropdown_option_by_mouse(
+                        fallback_text,
+                        f"海关监管第{level_index+1}级兜底",
+                        selector,
+                    )
+                    if not fallback_clicked:
+                        fallback_clicked = await click_dropdown_option_by_normalized_text(
+                            fallback_text,
+                            f"海关监管第{level_index+1}级兜底",
+                            selector,
+                        )
+                    if fallback_clicked:
+                        if not await wait_customs_level_committed(level_index, selector, fallback_text):
+                            logger.warning(
+                                f"海关监管第{level_index+1}级兜底点击后未写入，继续尝试下一个兜底: "
+                                f"fallback={fallback_text}"
+                            )
+                            continue
                         logger.warning(
                             f"海关监管第{level_index+1}级未找到预设值，已使用兜底选项继续: "
                             f"target={option_text}, fallback={fallback_text}"
@@ -4063,14 +4243,77 @@ class ShopAutomationRunner:
                         return True
             return False
 
-        for idx, option_text in enumerate(customs_levels):
-            ok = await pick_customs_level_by_index(idx, option_text)
+        async def fill_dynamic_customs_modal_fields(max_rounds: int = 8) -> bool:
+            """
+            海关监管字段会在选择上一项后动态生成下一项。
+            每次只处理当前第一个待选下拉框，选完后重新扫描弹窗。
+            """
+            for round_idx in range(max_rounds):
+                selects = await customs_select_snapshot()
+                if not selects:
+                    logger.info("海关监管动态填充：未检测到弹窗下拉字段")
+                    return True
+
+                unresolved = [
+                    (idx, item)
+                    for idx, item in enumerate(selects)
+                    if item.get("unresolved")
+                ]
+                if not unresolved:
+                    logger.success("海关监管动态填充：所有下拉字段已选择完成")
+                    return True
+
+                targets = build_auto_customs_targets(selects)
+                select_idx, select_info = unresolved[0]
+                target = targets[select_idx] if select_idx < len(targets) else "其他(Other)"
+                label = str(select_info.get("label", "") or f"第{select_idx + 1}个字段").strip()
+                logger.info(
+                    f"海关监管动态填充第{round_idx + 1}轮："
+                    f"处理第{select_idx + 1}个待选字段 {label}，目标={target}"
+                )
+
+                ok = await pick_customs_level_by_index(select_idx, target, allow_fallback=True)
+                if not ok:
+                    logger.warning(
+                        f"海关监管动态填充失败：第{select_idx + 1}个字段未选中，"
+                        f"label={label}, target={target}"
+                    )
+                    return False
+
+                await wait_customs_after_level(select_idx, None)
+                await asyncio.sleep(0.8)
+
+            remaining = await unresolved_customs_select_count()
+            if remaining > 0:
+                logger.warning(f"海关监管动态填充达到最大轮次后仍有 {remaining} 个待选字段")
+                return False
+            logger.success("海关监管动态填充：最大轮次后复查已无待选字段")
+            return True
+
+        if customs_auto_fill_targets:
+            ok = await fill_dynamic_customs_modal_fields()
             if not ok:
-                raise RuntimeError(f"海关监管第{idx+1}级未确认选中，停止后续流程: {option_text}")
+                raise RuntimeError("海关监管动态字段未全部确认选中，停止后续流程")
+        else:
+            for idx, option_text in enumerate(customs_levels):
+                ok = await pick_customs_level_by_index(idx, option_text)
+                if not ok:
+                    raise RuntimeError(f"海关监管第{idx+1}级未确认选中，停止后续流程: {option_text}")
+
+            remaining_customs_selects = await unresolved_customs_select_count()
+            if remaining_customs_selects > 0:
+                logger.warning(
+                    f"海关监管预设层级选择后仍有 {remaining_customs_selects} 个待选下拉字段，"
+                    "切换为动态填充兜底"
+                )
+                ok = await fill_dynamic_customs_modal_fields()
+                if not ok:
+                    raise RuntimeError("海关监管兜底动态字段未全部确认选中，停止后续流程")
 
         # 点击确定（若存在）。跳过/仅点击模式不再尝试确认，避免误点其它弹窗或页面按钮。
         if customs_skip_flow or customs_click_only:
             logger.info(f"海关监管弹窗确认步骤不执行: mode={customs_mode}")
+            await confirm_or_close_customs_modal_if_visible(f"海关监管弹窗兜底处理 mode={customs_mode}")
         else:
             confirm_btn = self.page.locator(".ant-modal button:has-text('确定'), .ant-drawer button:has-text('确定'), button:has-text('确定')")
             if await confirm_btn.count() > 0:
@@ -4568,8 +4811,20 @@ class ShopAutomationRunner:
         await asyncio.sleep(0.8)
         await self.capture_state("05_5_packaging_info")
 
-    async def step_translate(self):
+    async def step_translate(self, apply_ai_text: bool = True):
         logger.info("步骤7: 一键翻译")
+
+        async def title_has_chinese() -> bool:
+            try:
+                title_inputs = self.page.locator("input.ant-input.ant-input-sm")
+                total = await title_inputs.count()
+                for i in range(total):
+                    val = (await title_inputs.nth(i).input_value()).strip()
+                    if any("\u4e00" <= ch <= "\u9fff" for ch in val):
+                        return True
+                return False
+            except Exception:
+                return True
 
         async def click_visible_text_in_overlay(texts: list[str], description: str, require_all: bool = False) -> bool:
             try:
@@ -4637,34 +4892,113 @@ class ShopAutomationRunner:
                 logger.warning(f"{description}点击失败: {exc}")
             return False
 
-        # 先打开翻译面板。新版店小秘是蓝色“一键翻译”按钮 + 弹出面板。
-        opened = False
-        open_targets = [
-            self.page.locator("button:has-text('一键翻译')").first,
-            self.page.locator("a:has-text('一键翻译')").first,
-            self.page.get_by_text("一键翻译", exact=False).first,
-        ]
-        for target in open_targets:
-            try:
-                if await target.count() > 0:
-                    await target.scroll_into_view_if_needed()
-                    await target.click(timeout=3000, force=True)
-                    opened = True
-                    logger.success("点击成功: 一键翻译按钮")
-                    break
-            except Exception:
-                continue
-
-        if not opened:
+        async def open_translate_panel() -> bool:
+            open_targets = [
+                self.page.locator("button:has-text('一键翻译')").first,
+                self.page.locator("a:has-text('一键翻译')").first,
+                self.page.get_by_text("一键翻译", exact=False).first,
+            ]
+            for target in open_targets:
+                try:
+                    if await target.count() > 0:
+                        await target.scroll_into_view_if_needed()
+                        await target.click(timeout=3000, force=True)
+                        logger.success("点击成功: 一键翻译按钮")
+                        await asyncio.sleep(0.7)
+                        return True
+                except Exception:
+                    continue
             opened = await self.smart_click_by_text(["一键翻译"], "一键翻译按钮")
+            if opened:
+                await asyncio.sleep(0.7)
+            return opened
 
+        async def click_translate_language_option() -> bool:
+            try:
+                result = await self.page.evaluate(
+                    """() => {
+                        const visible = (el) => {
+                            if (!el || !el.getBoundingClientRect) return false;
+                            const st = window.getComputedStyle(el);
+                            const r = el.getBoundingClientRect();
+                            return st.display !== "none" && st.visibility !== "hidden" && r.width > 0 && r.height > 0;
+                        };
+                        const clickNode = (node) => {
+                            const rect = node.getBoundingClientRect();
+                            const init = {
+                                bubbles: true,
+                                cancelable: true,
+                                view: window,
+                                clientX: rect.left + rect.width / 2,
+                                clientY: rect.top + rect.height / 2,
+                            };
+                            ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach((type) => {
+                                node.dispatchEvent(new MouseEvent(type, init));
+                            });
+                        };
+                        const norm = (s) => (s || "")
+                            .replace(/\\s+/g, "")
+                            .replace(/->/g, "→")
+                            .replace(/-/g, "→")
+                            .trim();
+                        const roots = Array.from(document.querySelectorAll(
+                            ".ant-popover, .ant-dropdown, .translate-popover, .dropdown-menu, .dropdown-con, .popover, [class*='popover'], [class*='dropdown']"
+                        )).filter(visible);
+                        if (!roots.length) roots.push(document.body);
+                        const candidates = [];
+                        for (const root of roots) {
+                            const nodes = Array.from(root.querySelectorAll("button,a,li,div,span,p"))
+                                .filter(visible);
+                            for (const node of nodes) {
+                                const raw = (node.innerText || node.textContent || "").trim();
+                                const n = norm(raw);
+                                if (!raw) continue;
+                                const hasZhEn = n.includes("中文") && n.includes("英文");
+                                const hasArrow = n.includes("→") || n.includes("至") || n.includes("到");
+                                const isBigChoice = node.getBoundingClientRect().width > 80 && node.getBoundingClientRect().height > 24;
+                                if (!hasZhEn) continue;
+                                let score = 50;
+                                if (hasArrow) score += 30;
+                                if (isBigChoice) score += 15;
+                                if (n === "中文→英文" || n === "中文英文") score += 25;
+                                candidates.push({ node, raw, score });
+                            }
+                        }
+                        candidates.sort((a, b) => b.score - a.score);
+                        const found = candidates[0];
+                        if (!found) return { ok: false, text: "" };
+                        const target = found.node.closest("button,a,li") || found.node;
+                        target.scrollIntoView({ block: "center", inline: "nearest" });
+                        clickNode(target);
+                        return { ok: true, text: found.raw };
+                    }"""
+                )
+                if result and result.get("ok"):
+                    logger.success(f"点击成功: 翻译语言-中文→英文 = {result.get('text')}")
+                    await asyncio.sleep(1.2)
+                    return True
+            except Exception as exc:
+                logger.warning(f"翻译语言-中文→英文点击失败: {exc}")
+            return False
+
+        # 新版店小秘是蓝色“一键翻译”按钮 + 弹出面板。
+        opened = await open_translate_panel()
         if opened:
-            await asyncio.sleep(0.6)
-
-            # 新版面板：先选“普通翻译”，再选“中文 → 英文”。
             picked = False
-            await click_visible_text_in_overlay(["普通翻译"], "翻译方式-普通翻译")
-            for _ in range(10):
+
+            for attempt in range(3):
+                if attempt > 0:
+                    await open_translate_panel()
+
+                if attempt == 0:
+                    await click_visible_text_in_overlay(["普通翻译"], "翻译方式-普通翻译")
+                    await asyncio.sleep(0.5)
+
+                if await click_translate_language_option():
+                    logger.success("选择成功: 普通翻译 -> 中文 → 英文")
+                    picked = True
+                    break
+
                 new_panel_item = await click_visible_text_in_overlay(["中文", "英文"], "翻译语言-中文→英文", require_all=True)
                 if new_panel_item:
                     logger.success("选择成功: 普通翻译 -> 中文 → 英文")
@@ -4691,15 +5025,22 @@ class ShopAutomationRunner:
                     picked = True
                     break
 
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.5)
 
             if not picked:
                 logger.warning("未找到翻译选项: 普通翻译 -> 中文 → 英文")
 
         await asyncio.sleep(1.2)
-        await self.wait_translation_done(timeout_sec=35)
-        await self.step_ai_text_optimization()
+        await self.wait_translation_done(timeout_sec=35 if apply_ai_text else 12)
+        if not apply_ai_text and await title_has_chinese():
+            logger.warning("采集海关前店小秘翻译未落地，跳过本次海关选项采集，避免采集翻译前字段")
+            return False
+        if apply_ai_text:
+            await self.step_ai_text_optimization()
+        else:
+            logger.info("店小秘一键翻译完成；当前流程跳过AI标题/SKU写回")
         await self.capture_state("05_translate")
+        return True
 
     async def wait_translation_done(self, timeout_sec: int = 25):
         """
@@ -5119,6 +5460,9 @@ class ShopAutomationRunner:
     async def detect_publish_success(self) -> tuple[bool, str]:
         if not self.page or self.page.is_closed():
             return True, "编辑页已关闭"
+        validation_errors = await self.collect_visible_validation_errors()
+        if validation_errors:
+            return False, "页面仍有校验错误: " + " | ".join(validation_errors[:5])
         try:
             current_url = self.page.url or ""
             if "smt/edit" not in current_url.lower() and "edit" not in current_url.lower():
@@ -5227,8 +5571,119 @@ class ShopAutomationRunner:
             logger.warning(f"读取发布校验错误失败: {exc}")
             return []
 
+    async def fix_title_and_sku_validation_errors(self, stage: str = "发布校验") -> bool:
+        if not self.page or self.page.is_closed():
+            return False
+        try:
+            result = await self.page.evaluate(
+                """(stage) => {
+                    const visible = (el) => {
+                        if (!el || !el.getBoundingClientRect) return false;
+                        const r = el.getBoundingClientRect();
+                        const st = getComputedStyle(el);
+                        return st.display !== "none" && st.visibility !== "hidden" && r.width > 0 && r.height > 0;
+                    };
+                    const setInput = (input, value) => {
+                        input.scrollIntoView({ block: "center", inline: "nearest" });
+                        input.focus();
+                        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+                        if (setter) setter.call(input, value); else input.value = value;
+                        input.dispatchEvent(new Event("input", { bubbles: true }));
+                        input.dispatchEvent(new Event("change", { bubbles: true }));
+                        input.blur();
+                    };
+                    const norm = (s) => (s || "").replace(/\\s+/g, " ").trim();
+                    const compactSku = (value) => {
+                        let s = norm(String(value || "").replace(/[^A-Za-z0-9 ().-]+/g, " "));
+                        if (s.length <= 20) return s;
+                        for (const ch of [" ", "-", ".", "(", ")"]) {
+                            while (s.includes(ch) && s.length > 20) s = s.replace(ch, "");
+                        }
+                        if (s.length <= 20) return s;
+                        let remove = s.length - 20;
+                        const out = [];
+                        for (const ch of s) {
+                            if (/\\d/.test(ch) && remove > 0) {
+                                remove -= 1;
+                                continue;
+                            }
+                            out.push(ch);
+                        }
+                        s = out.join("");
+                        return s.slice(0, 20).trim();
+                    };
+                    const cleanTitle = (value) => {
+                        let s = norm(String(value || "").replace(/[^\\x00-\\x7F]+/g, " "));
+                        if (s.length <= 128) return s;
+                        const words = s.split(" ");
+                        while (words.length > 1 && words.join(" ").length > 128) words.pop();
+                        s = words.join(" ").trim();
+                        return (s || norm(value).slice(0, 128)).slice(0, 128).trim();
+                    };
+
+                    const skuTables = Array.from(document.querySelectorAll("table, .ant-table, .ant-table-container"))
+                        .filter((el) => norm(el.innerText || el.textContent).includes("自定义名称"));
+                    const skuInputs = [];
+                    for (const table of skuTables) {
+                        for (const input of Array.from(table.querySelectorAll("tbody tr input[type='text'], tbody tr input:not([type]), input[maxlength='20']"))) {
+                            if (!visible(input) || skuInputs.includes(input)) continue;
+                            const value = norm(input.value);
+                            const rect = input.getBoundingClientRect();
+                            if (!value || rect.width < 60 || /^https?:/i.test(value) || /^\\d+(\\.\\d+)?$/.test(value)) continue;
+                            if (!/[A-Za-z]/.test(value) && !/[\\u4e00-\\u9fff]/.test(value)) continue;
+                            skuInputs.push(input);
+                        }
+                    }
+
+                    let skuFixed = 0;
+                    const skuBefore = [];
+                    for (const input of skuInputs) {
+                        const raw = norm(input.value);
+                        const next = compactSku(raw);
+                        if (next && next !== raw && (raw.length > 20 || /[^A-Za-z0-9 ().-]/.test(raw))) {
+                            skuBefore.push(raw);
+                            setInput(input, next);
+                            skuFixed += 1;
+                        }
+                    }
+
+                    const titleInputs = Array.from(document.querySelectorAll("input.ant-input.ant-input-sm, input.ant-input"))
+                        .filter((input) => visible(input) && !skuInputs.includes(input))
+                        .filter((input) => {
+                            const value = norm(input.value);
+                            if (!value || /^\\d+(\\.\\d+)?$/.test(value) || /^https?:/i.test(value)) return false;
+                            return value.length > 128 || /[^\\x00-\\x7F]/.test(value);
+                        });
+                    let titleFixed = 0;
+                    for (const input of titleInputs) {
+                        const raw = norm(input.value);
+                        const next = cleanTitle(raw);
+                        if (next && next !== raw) {
+                            setInput(input, next);
+                            titleFixed += 1;
+                        }
+                    }
+
+                    return { stage, skuFixed, titleFixed, skuBefore: skuBefore.slice(0, 5) };
+                }""",
+                stage,
+            )
+            sku_fixed = int(result.get("skuFixed", 0)) if isinstance(result, dict) else 0
+            title_fixed = int(result.get("titleFixed", 0)) if isinstance(result, dict) else 0
+            if sku_fixed or title_fixed:
+                logger.success(
+                    f"{stage}: 标题/SKU规则修正完成，SKU={sku_fixed}，标题={title_fixed}，"
+                    f"sku_preview={(result.get('skuBefore') or [])[:3] if isinstance(result, dict) else []}"
+                )
+                await asyncio.sleep(0.8)
+                return True
+        except Exception as exc:
+            logger.warning(f"{stage}: 标题/SKU规则修正失败: {exc}")
+        return False
+
     async def step_publish(self) -> bool:
         publish_action = str(CONFIG.get("publish_action", "立即发布") or "立即发布").strip()
+        await self.fix_title_and_sku_validation_errors("发布前")
         if "待发布" in publish_action or "移入" in publish_action:
             logger.info("步骤8: 保存并移入待发布")
             clicked = await self.click_save_to_pending_button_precise("保存并移入待发布")
@@ -5246,6 +5701,17 @@ class ShopAutomationRunner:
                     logger.warning(f"保存并移入待发布未确认成功，页面可见校验提示: {' | '.join(errors)}")
                 else:
                     logger.warning(f"保存并移入待发布未确认成功: {success_reason}")
+                fixed = await self.fix_title_and_sku_validation_errors("保存失败后")
+                if fixed:
+                    retry_clicked = await self.click_save_to_pending_button_precise("保存并移入待发布(修正后重试)")
+                    if retry_clicked:
+                        await asyncio.sleep(2)
+                        success, success_reason = await self.wait_publish_success(timeout_sec=10)
+                        if success:
+                            logger.success(f"修正后确认保存并移入待发布成功: {success_reason}")
+                            await self.close_publish_success_dialog_if_present()
+                    else:
+                        logger.error("修正后重试保存失败：未点到保存并移入待发布")
             try:
                 await self.capture_state("07_publish")
             except Exception as e:
@@ -5571,6 +6037,21 @@ async def fetch_dropdown_info(mode: str = "linked"):
                 await page.wait_for_timeout(1800)
             except Exception as template_exc:
                 logger.warning(f"采集海关前选择属性模板失败，继续按当前页面状态采集: {template_exc}")
+
+        if mode in {"customs", "all"}:
+            try:
+                runner.page = page
+                logger.info("采集海关前先执行店小秘一键翻译，确保翻译后生成的海关字段已刷新")
+                translated = await runner.step_translate(apply_ai_text=False)
+                if not translated:
+                    raise RuntimeError("店小秘一键翻译未落地，已停止本次海关选项采集")
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(1500)
+            except Exception as translate_exc:
+                logger.warning(f"采集海关前执行一键翻译失败，继续按当前页面状态采集: {translate_exc}")
 
         # 采集页面上的 ant-select 及其标签/当前值/placeholder
         data = await page.evaluate(

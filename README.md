@@ -2,6 +2,8 @@
 
 这是一个用于店小秘速卖通采集箱商品自动编辑的桌面工具。当前主版本使用 Python、Tkinter 和 Playwright 连接 Chrome 调试端口完成页面自动化。
 
+最新更新内容见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 主要能力
 
 - 连接本机 Chrome 远程调试端口 `9222`
